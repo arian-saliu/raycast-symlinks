@@ -1,40 +1,147 @@
-import { Form, ActionPanel, Action, showToast } from "@raycast/api";
+import { Form, ActionPanel, Action, showToast, Toast, confirmAlert } from "@raycast/api";
+import { useState } from "react";
+import { promisify } from "util";
+import { exec } from "child_process";
+import { saveSymlink } from "./utils";
+import fs from "fs";
+import path from "path";
+import { homedir } from "os";
 
-type Values = {
-  textfield: string;
-  textarea: string;
-  datepicker: Date;
-  checkbox: boolean;
-  dropdown: string;
-  tokeneditor: string[];
-};
+class ValidationError extends Error {
+    field: string;
+
+    constructor({ field, message }: { field: string; message: string }) {
+        super(message);
+        this.field = field;
+        this.name = "ValidationError";
+    }
+}
+
+const execAsync = promisify(exec);
+
+const HOMEDIR = `${homedir()}`;
 
 export default function Command() {
-  function handleSubmit(values: Values) {
-    console.log(values);
-    showToast({ title: "Submitted form", message: "See logs for submitted values" });
-  }
+    const [name, setName] = useState<string>("");
+    const [source, setSource] = useState<string>("");
+    const [destination, setDestination] = useState<string>("");
+    const [forceCreate, setForceCreate] = useState<boolean>(false);
 
-  return (
-    <Form
-      actions={
-        <ActionPanel>
-          <Action.SubmitForm onSubmit={handleSubmit} />
-        </ActionPanel>
-      }
-    >
-      <Form.Description text="This form showcases all available form elements." />
-      <Form.TextField id="textfield" title="Text field" placeholder="Enter text" defaultValue="Raycast" />
-      <Form.TextArea id="textarea" title="Text area" placeholder="Enter multi-line text" />
-      <Form.Separator />
-      <Form.DatePicker id="datepicker" title="Date picker" />
-      <Form.Checkbox id="checkbox" title="Checkbox" label="Checkbox Label" storeValue />
-      <Form.Dropdown id="dropdown" title="Dropdown">
-        <Form.Dropdown.Item value="dropdown-item" title="Dropdown Item" />
-      </Form.Dropdown>
-      <Form.TagPicker id="tokeneditor" title="Tag picker">
-        <Form.TagPicker.Item value="tagpicker-item" title="Tag Picker Item" />
-      </Form.TagPicker>
-    </Form>
-  );
+    function normalizePath(inputPath: string): string {
+        return path.normalize(inputPath.replace(/^~/, HOMEDIR));
+    }
+
+    async function validatePaths(): Promise<boolean> {
+        const normalizedSource = normalizePath(source);
+        const normalizedDest = normalizePath(destination);
+
+        if (!fs.existsSync(normalizedSource)) {
+            throw new ValidationError({ field: "source", message: "Source path does not exist" });
+        }
+
+        if (!fs.existsSync(normalizedDest)) {
+            throw new ValidationError({ field: "destination", message: "Destination path does not exist" });
+        }
+
+        const destinationStats = fs.statSync(normalizedDest);
+        if (!destinationStats.isDirectory()) {
+            throw new ValidationError({ field: "destination", message: "Destination must be a directory" });
+        }
+
+        return true;
+    }
+
+    async function createSymlink() {
+        try {
+            if (!name || !source || !destination) {
+                await showToast({ style: Toast.Style.Failure, title: "All fields are required" });
+                return;
+            }
+
+            await validatePaths();
+
+            const normalizedSource = normalizePath(source);
+            const normalizedDest = normalizePath(destination);
+            const destinationPath = path.join(normalizedDest, path.basename(normalizedSource));
+
+            if (fs.existsSync(destinationPath)) {
+                if (forceCreate) {
+                    const proceed = await confirmAlert({
+                        title: "Replace existing symlink?",
+                        message: "This will remove the existing symlink.",
+                        primaryAction: {
+                            title: "Replace",
+                        },
+                    });
+
+                    if (!proceed) return;
+                } else {
+                    await showToast({
+                        style: Toast.Style.Failure,
+                        title: "A file or symlink already exists at destination",
+                    });
+                    return;
+                }
+            }
+
+            let sourcePath = normalizedSource;
+
+            const command = forceCreate
+                ? `ln -sf "${sourcePath}" "${destinationPath}"`
+                : `ln -s "${sourcePath}" "${destinationPath}"`;
+
+            await execAsync(command);
+            saveSymlink(name, sourcePath, destinationPath);
+
+            await showToast({ style: Toast.Style.Success, title: "Symlink created successfully" });
+        } catch (error) {
+            console.error(error);
+            await showToast({
+                style: Toast.Style.Failure,
+                title: "Failed to create symlink",
+                message: error instanceof Error ? error.message : "Unknown error",
+            });
+        }
+    }
+
+    return (
+        <Form
+            actions={
+                <ActionPanel>
+                    <Action.SubmitForm title="Create Symlink" onSubmit={createSymlink} />
+                </ActionPanel>
+            }
+        >
+            <Form.Description text="Create a new Symbolink link." />
+            <Form.TextField id="name" title="Name" placeholder="A friendly name" value={name} onChange={setName} />
+
+            <Form.FilePicker
+                id="source"
+                title="Source"
+                allowMultipleSelection={false}
+                canChooseDirectories
+                canChooseFiles={false}
+                value={source ? [source] : []}
+                onChange={(paths) => setSource(paths[0])}
+            />
+
+            <Form.FilePicker
+                id="destination"
+                title="Destination"
+                allowMultipleSelection={false}
+                canChooseDirectories
+                canChooseFiles={false}
+                value={destination ? [destination] : []}
+                onChange={(paths) => setDestination(paths[0])}
+            />
+
+            <Form.Checkbox
+                id="force"
+                label="Replace if already exists"
+                title="Force creation"
+                value={forceCreate}
+                onChange={setForceCreate}
+            />
+        </Form>
+    );
 }
