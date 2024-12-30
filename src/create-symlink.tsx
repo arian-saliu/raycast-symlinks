@@ -2,7 +2,7 @@ import { Form, ActionPanel, Action, showToast, Toast, confirmAlert } from "@rayc
 import { useState } from "react";
 import { promisify } from "util";
 import { exec } from "child_process";
-import { saveSymlink } from "./utils";
+import { saveSymlink, getSymlinks } from "./utils";
 import fs from "fs";
 import path from "path";
 import { homedir } from "os";
@@ -55,6 +55,17 @@ export default function Command() {
         try {
             if (!name || !source || !destination) {
                 await showToast({ style: Toast.Style.Failure, title: "All fields are required" });
+                return;
+            }
+
+            const existingSymlinks = getSymlinks();
+            const nameExists = existingSymlinks.some((symlink: { name: string }) => symlink.name === name);
+            if (nameExists) {
+                await showToast({
+                    style: Toast.Style.Failure,
+                    title: "Name already exists",
+                    message: "Please choose a different name for your symlink",
+                });
                 return;
             }
 

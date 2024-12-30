@@ -14,7 +14,13 @@
         {
             "name": "create-symlink",
             "title": "Create Symlink",
-            "description": "",
+            "description": "Create a new symbolic link",
+            "mode": "view"
+        },
+        {
+            "name": "list-symlinks",
+            "title": "List Symlinks",
+            "description": "List and manage existing symbolic links",
             "mode": "view"
         }
     ],
