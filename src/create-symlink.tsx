@@ -95,7 +95,7 @@ export default function Command() {
                 }
             }
 
-            let sourcePath = normalizedSource;
+            const sourcePath = normalizedSource;
 
             const command = forceCreate
                 ? `ln -sf "${sourcePath}" "${destinationPath}"`
