@@ -1,157 +1,120 @@
-import { Form, ActionPanel, Action, showToast, Toast, confirmAlert } from "@raycast/api";
-import { useState } from "react";
-import { promisify } from "util";
-import { exec } from "child_process";
-import { saveSymlink, getSymlinks } from "./utils";
+import { Action, ActionPanel, Alert, Form, Toast, confirmAlert, showToast } from "@raycast/api";
+import { showFailureToast, useForm } from "@raycast/utils";
 import fs from "fs";
 import path from "path";
-import { homedir } from "os";
+import { createLink, isInside, lstatOrUndefined } from "./links";
+import { getSymlinks, saveSymlink } from "./storage";
 
-class ValidationError extends Error {
-    field: string;
-
-    constructor({ field, message }: { field: string; message: string }) {
-        super(message);
-        this.field = field;
-        this.name = "ValidationError";
-    }
+interface FormValues {
+    name: string;
+    source: string[];
+    destination: string[];
+    replace: boolean;
 }
 
-const execAsync = promisify(exec);
-
-const HOMEDIR = `${homedir()}`;
+const INITIAL_VALUES: FormValues = { name: "", source: [], destination: [], replace: false };
 
 export default function Command() {
-    const [name, setName] = useState<string>("");
-    const [source, setSource] = useState<string>("");
-    const [destination, setDestination] = useState<string>("");
-    const [forceCreate, setForceCreate] = useState<boolean>(false);
+    const { handleSubmit, itemProps, setValidationError, reset } = useForm<FormValues>({
+        initialValues: INITIAL_VALUES,
+        validation: {
+            name: (value) => (value?.trim() ? undefined : "Name is required"),
+            source: (value) => {
+                if (!value?.length) return "Choose a file or folder";
+                if (!fs.existsSync(value[0])) return "Source does not exist";
+            },
+            destination: (value) => {
+                if (!value?.length) return "Choose a folder";
+                if (!fs.existsSync(value[0])) return "Destination does not exist";
+                if (!fs.statSync(value[0]).isDirectory()) return "Destination must be a folder";
+            },
+        },
+        async onSubmit(values) {
+            // Errors set below aren't cleared by the field validators, so start each submit clean.
+            setValidationError("name", undefined);
+            setValidationError("destination", undefined);
 
-    function normalizePath(inputPath: string): string {
-        return path.normalize(inputPath.replace(/^~/, HOMEDIR));
-    }
+            const name = values.name.trim();
+            const source = path.resolve(values.source[0]);
+            const destinationDir = path.resolve(values.destination[0]);
+            const linkPath = path.join(destinationDir, path.basename(source));
+            const linkName = path.basename(linkPath);
 
-    async function validatePaths(): Promise<boolean> {
-        const normalizedSource = normalizePath(source);
-        const normalizedDest = normalizePath(destination);
-
-        if (!fs.existsSync(normalizedSource)) {
-            throw new ValidationError({ field: "source", message: "Source path does not exist" });
-        }
-
-        if (!fs.existsSync(normalizedDest)) {
-            throw new ValidationError({ field: "destination", message: "Destination path does not exist" });
-        }
-
-        const destinationStats = fs.statSync(normalizedDest);
-        if (!destinationStats.isDirectory()) {
-            throw new ValidationError({ field: "destination", message: "Destination must be a directory" });
-        }
-
-        return true;
-    }
-
-    async function createSymlink() {
-        try {
-            if (!name || !source || !destination) {
-                await showToast({ style: Toast.Style.Failure, title: "All fields are required" });
-                return;
-            }
-
-            const existingSymlinks = getSymlinks();
-            const nameExists = existingSymlinks.some((symlink: { name: string }) => symlink.name === name);
-            if (nameExists) {
-                await showToast({
-                    style: Toast.Style.Failure,
-                    title: "Name already exists",
-                    message: "Please choose a different name for your symlink",
-                });
-                return;
-            }
-
-            await validatePaths();
-
-            const normalizedSource = normalizePath(source);
-            const normalizedDest = normalizePath(destination);
-            const destinationPath = path.join(normalizedDest, path.basename(normalizedSource));
-
-            if (fs.existsSync(destinationPath)) {
-                if (forceCreate) {
-                    const proceed = await confirmAlert({
-                        title: "Replace existing symlink?",
-                        message: "This will remove the existing symlink.",
-                        primaryAction: {
-                            title: "Replace",
-                        },
-                    });
-
-                    if (!proceed) return;
-                } else {
-                    await showToast({
-                        style: Toast.Style.Failure,
-                        title: "A file or symlink already exists at destination",
-                    });
-                    return;
+            try {
+                if (getSymlinks().some((s) => s.name === name)) {
+                    setValidationError("name", "A symlink with this name already exists");
+                    return false;
                 }
+                if (linkPath === source) {
+                    setValidationError("destination", "This folder already holds the source");
+                    return false;
+                }
+                if (isInside(destinationDir, source)) {
+                    setValidationError("destination", "Destination is inside the source, which would create a loop");
+                    return false;
+                }
+
+                const existing = lstatOrUndefined(linkPath);
+                if (existing && !existing.isSymbolicLink()) {
+                    setValidationError("destination", `"${linkName}" already exists here and is not a symlink`);
+                    return false;
+                }
+                if (existing && !values.replace) {
+                    setValidationError("destination", `A symlink named "${linkName}" already exists here`);
+                    return false;
+                }
+                if (existing) {
+                    const confirmed = await confirmAlert({
+                        title: "Replace existing symlink?",
+                        message: `${linkPath} points to ${fs.readlinkSync(linkPath)}. Only the link is replaced; what it points to is not touched.`,
+                        primaryAction: { title: "Replace", style: Alert.ActionStyle.Destructive },
+                    });
+                    if (!confirmed) return false;
+                }
+
+                await createLink(source, linkPath, existing !== undefined);
+                saveSymlink({ name, source, destination: linkPath });
+
+                await showToast({ style: Toast.Style.Success, title: "Symlink created", message: linkPath });
+                reset(INITIAL_VALUES);
+            } catch (error) {
+                await showFailureToast(error, { title: "Failed to create symlink" });
+                return false;
             }
-
-            const sourcePath = normalizedSource;
-
-            const command = forceCreate
-                ? `ln -sf "${sourcePath}" "${destinationPath}"`
-                : `ln -s "${sourcePath}" "${destinationPath}"`;
-
-            await execAsync(command);
-            saveSymlink(name, sourcePath, destinationPath);
-
-            await showToast({ style: Toast.Style.Success, title: "Symlink created successfully" });
-        } catch (error) {
-            console.error(error);
-            await showToast({
-                style: Toast.Style.Failure,
-                title: "Failed to create symlink",
-                message: error instanceof Error ? error.message : "Unknown error",
-            });
-        }
-    }
+        },
+    });
 
     return (
         <Form
             actions={
                 <ActionPanel>
-                    <Action.SubmitForm title="Create Symlink" onSubmit={createSymlink} />
+                    <Action.SubmitForm title="Create Symlink" onSubmit={handleSubmit} />
                 </ActionPanel>
             }
         >
-            <Form.Description text="Create a new Symbolink link." />
-            <Form.TextField id="name" title="Name" placeholder="A friendly name" value={name} onChange={setName} />
-
+            <Form.Description text="Create a new symbolic link." />
+            <Form.TextField title="Name" placeholder="A friendly name" {...itemProps.name} />
             <Form.FilePicker
-                id="source"
                 title="Source"
+                info="The file or folder the link points to"
                 allowMultipleSelection={false}
                 canChooseDirectories
-                canChooseFiles={false}
-                value={source ? [source] : []}
-                onChange={(paths) => setSource(paths[0])}
+                canChooseFiles
+                {...itemProps.source}
             />
-
             <Form.FilePicker
-                id="destination"
                 title="Destination"
+                info="The folder the link is created in. It gets the same name as the source."
                 allowMultipleSelection={false}
                 canChooseDirectories
                 canChooseFiles={false}
-                value={destination ? [destination] : []}
-                onChange={(paths) => setDestination(paths[0])}
+                {...itemProps.destination}
             />
-
             <Form.Checkbox
-                id="force"
-                label="Replace if already exists"
-                title="Force creation"
-                value={forceCreate}
-                onChange={setForceCreate}
+                title="Force Creation"
+                label="Replace an existing symlink with the same name"
+                info="Only symlinks are replaced. A real file or folder is never overwritten."
+                {...itemProps.replace}
             />
         </Form>
     );

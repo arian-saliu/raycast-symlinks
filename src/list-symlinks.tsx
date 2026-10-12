@@ -1,124 +1,111 @@
-import { ActionPanel, List, Action, Icon, confirmAlert, showToast, Toast } from "@raycast/api";
-import { useEffect, useState } from "react";
-import { getSymlinks, removeSymlink } from "./utils";
-import fs from "fs";
+import { Action, ActionPanel, Alert, Color, Icon, Keyboard, List, Toast, confirmAlert, showToast } from "@raycast/api";
+import { showFailureToast, usePromise } from "@raycast/utils";
+import { LinkStatus, getLinkStatus, isOwnLink, removeLink } from "./links";
+import { SymlinkRecord, getSymlinks, removeSymlink } from "./storage";
 
-interface Symlink {
-    name: string;
-    source: string;
-    destination: string;
+interface Entry extends SymlinkRecord {
+    status: LinkStatus;
+}
+
+const STATUS_ACCESSORY: Record<LinkStatus, List.Item.Accessory> = {
+    ok: { icon: { source: Icon.CheckCircle, tintColor: Color.Green }, tooltip: "Valid symlink" },
+    broken: {
+        icon: { source: Icon.ExclamationMark, tintColor: Color.Orange },
+        tooltip: "Broken: the source no longer exists",
+    },
+    missing: { icon: { source: Icon.XMarkCircle, tintColor: Color.Red }, tooltip: "The symlink no longer exists" },
+    replaced: {
+        icon: { source: Icon.XMarkCircle, tintColor: Color.Red },
+        tooltip: "Something else is at the symlink's path now",
+    },
+    unknown: { icon: { source: Icon.QuestionMarkCircle, tintColor: Color.SecondaryText }, tooltip: "Couldn't check" },
+};
+
+function deleteMessage({ status, destination }: Entry) {
+    switch (status) {
+        case "ok":
+        case "broken":
+            return `This removes the symlink at ${destination}. What it points to is not touched.`;
+        case "missing":
+            return "The symlink is already gone, so only the entry is removed.";
+        default:
+            return `${destination} is no longer this symlink, so it is left alone and only the entry is removed.`;
+    }
+}
+
+async function loadEntries(): Promise<Entry[]> {
+    return getSymlinks().map((record) => ({ ...record, status: getLinkStatus(record) }));
 }
 
 export default function Command() {
-    const [symlinks, setSymlinks] = useState<Symlink[]>([]);
-    const [isLoading, setIsLoading] = useState(true);
+    const { data: entries = [], isLoading, revalidate } = usePromise(loadEntries);
 
-    useEffect(() => {
-        loadSymlinks();
-    }, []);
+    async function deleteEntry(entry: Entry) {
+        const confirmed = await confirmAlert({
+            title: `Delete "${entry.name}"?`,
+            message: deleteMessage(entry),
+            primaryAction: { title: "Delete", style: Alert.ActionStyle.Destructive },
+        });
+        if (!confirmed) return;
 
-    const loadSymlinks = () => {
         try {
-            const links = getSymlinks();
-            setSymlinks(links);
+            // removeLink checks the path again right before unlinking, so it never removes anything but our link.
+            if (isOwnLink(entry.status)) await removeLink(entry);
+            removeSymlink(entry.destination);
+            await revalidate();
+            await showToast({ style: Toast.Style.Success, title: "Symlink deleted" });
         } catch (error) {
-            console.error("Failed to load symlinks:", error);
-        } finally {
-            setIsLoading(false);
+            await showFailureToast(error, { title: "Failed to delete symlink" });
         }
-    };
-
-    const handleDeleteSymlink = async (symlink: Symlink) => {
-        try {
-            const proceed = await confirmAlert({
-                title: "Delete Symlink",
-                message: `Are you sure you want to delete the symlink "${symlink.name}"?`,
-                primaryAction: {
-                    title: "Delete",
-                },
-            });
-
-            if (!proceed) return;
-
-            if (fs.existsSync(symlink.destination)) {
-                fs.unlinkSync(symlink.destination);
-            }
-
-            removeSymlink(symlink.source, symlink.destination);
-
-            loadSymlinks();
-
-            await showToast({
-                style: Toast.Style.Success,
-                title: "Symlink deleted successfully",
-            });
-        } catch (error) {
-            console.error("Failed to delete symlink:", error);
-            await showToast({
-                style: Toast.Style.Failure,
-                title: "Failed to delete symlink",
-                message: error instanceof Error ? error.message : "Unknown error",
-            });
-        }
-    };
-
-    const checkSymlinkValidity = (destination: string): boolean => {
-        try {
-            return fs.existsSync(destination) && fs.lstatSync(destination).isSymbolicLink();
-        } catch {
-            return false;
-        }
-    };
+    }
 
     return (
         <List isLoading={isLoading} searchBarPlaceholder="Search symlinks...">
-            {symlinks.map((symlink) => {
-                const isValid = checkSymlinkValidity(symlink.destination);
-                return (
-                    <List.Item
-                        key={`${symlink.source}-${symlink.destination}`}
-                        title={symlink.name}
-                        subtitle={symlink.source}
-                        accessories={[
-                            {
-                                icon: isValid ? Icon.CheckCircle : Icon.XMarkCircle,
-                                tooltip: isValid ? "Valid symlink" : "Invalid or broken symlink",
-                            },
-                        ]}
-                        actions={
-                            <ActionPanel>
-                                <Action
-                                    title="Delete Symlink"
-                                    icon={Icon.Trash}
-                                    style={Action.Style.Destructive}
-                                    onAction={() => handleDeleteSymlink(symlink)}
-                                />
+            {entries.map((entry) => (
+                <List.Item
+                    key={entry.destination}
+                    title={entry.name}
+                    subtitle={entry.source}
+                    accessories={[STATUS_ACCESSORY[entry.status]]}
+                    actions={
+                        <ActionPanel>
+                            <ActionPanel.Section>
+                                <Action.ShowInFinder title="Show Source in Finder" path={entry.source} />
                                 <Action.OpenWith
                                     title="Open Source"
-                                    path={symlink.source}
-                                    shortcut={{ modifiers: ["cmd"], key: "o" }}
+                                    path={entry.source}
+                                    shortcut={Keyboard.Shortcut.Common.Open}
                                 />
                                 <Action.OpenWith
                                     title="Open Destination"
-                                    path={symlink.destination}
-                                    shortcut={{ modifiers: ["cmd", "shift"], key: "o" }}
+                                    path={entry.destination}
+                                    shortcut={Keyboard.Shortcut.Common.OpenWith}
                                 />
                                 <Action.CopyToClipboard
                                     title="Copy Source Path"
-                                    content={symlink.source}
+                                    content={entry.source}
                                     shortcut={{ modifiers: ["cmd"], key: "c" }}
                                 />
                                 <Action.CopyToClipboard
                                     title="Copy Destination Path"
-                                    content={symlink.destination}
-                                    shortcut={{ modifiers: ["cmd", "shift"], key: "c" }}
+                                    content={entry.destination}
+                                    shortcut={Keyboard.Shortcut.Common.Copy}
                                 />
-                            </ActionPanel>
-                        }
-                    />
-                );
-            })}
-            {symlinks.length === 0 && !isLoading && (
+                            </ActionPanel.Section>
+                            <ActionPanel.Section>
+                                <Action
+                                    title="Delete Symlink"
+                                    icon={Icon.Trash}
+                                    style={Action.Style.Destructive}
+                                    shortcut={Keyboard.Shortcut.Common.Remove}
+                                    onAction={() => deleteEntry(entry)}
+                                />
+                            </ActionPanel.Section>
+                        </ActionPanel>
+                    }
+                />
+            ))}
+            {!isLoading && entries.length === 0 && (
                 <List.EmptyView
                     title="No symlinks found"
                     description="Create a new symlink using the Create Symlink command"

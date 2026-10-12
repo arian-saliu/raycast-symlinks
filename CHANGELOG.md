@@ -1,6 +1,7 @@
 # Symlinks Manager Changelog
 
-## [Added the two main commands] - {PR_MERGE_DATE}
+## [Initial Version] - {PR_MERGE_DATE}
 
-- Add `create-symlink` command to create a new symbolic link.
-- Add `list-symlink` command to list and delete symbolic links.
+- Add `Create Symlink` command to create a symbolic link to a file or folder.
+- Add `List Symlinks` command to see whether each link is valid, broken, missing or replaced, and to open, copy or delete it.
+- Links are created without running shell commands, and the extension only ever replaces or deletes its own symlinks, never a real file or folder.
